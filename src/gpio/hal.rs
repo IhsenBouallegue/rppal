@@ -1,4 +1,8 @@
 use core::convert::Infallible;
+use std::{sync::Arc, time::Duration};
+
+use futures::channel::oneshot;
+use tokio::sync::Notify;
 
 use super::{InputPin, IoPin, Level, OutputPin, Pin};
 
@@ -211,5 +215,60 @@ impl embedded_hal_0::PwmPin for IoPin {
         if self.soft_pwm.is_some() {
             let _ = self.set_pwm_frequency(self.frequency, self.duty_cycle);
         }
+    }
+}
+
+impl embedded_hal_async::digital::Wait for InputPin {
+    async fn wait_for_low(&mut self) -> core::result::Result<(), Self::Error> {
+        if self.is_low() {
+            println!("is low");
+            return Ok(());
+        }
+        println!("is not low, waiting for falling");
+
+        self.wait_for_falling_edge().await
+    }
+
+    async fn wait_for_high(&mut self) -> core::result::Result<(), Self::Error> {
+        if self.is_low() {
+            println!("is high already");
+            return Ok(());
+        }
+        println!("is not high, waiting for rising");
+
+        self.wait_for_rising_edge().await
+    }
+
+    async fn wait_for_rising_edge(&mut self) -> core::result::Result<(), Self::Error> {
+        let notify = Arc::new(Notify::new());
+        let notify_for_interrupt = notify.clone();
+        let _ = self.set_async_interrupt(super::Trigger::RisingEdge, move |_| {
+            notify_for_interrupt.notify_one();
+        });
+        notify.notified().await;
+        Ok(())
+    }
+
+    async fn wait_for_falling_edge(&mut self) -> core::result::Result<(), Self::Error> {
+        let notify = Arc::new(Notify::new());
+        let notify_for_interrupt = notify.clone();
+        let _ = self.set_async_interrupt(super::Trigger::FallingEdge, move |_| {
+            println!("setting async notfierd");
+            notify_for_interrupt.notify_one();
+        });
+        println!("waiting for notify");
+        notify.notified().await;
+        Ok(())
+    }
+
+    async fn wait_for_any_edge(&mut self) -> core::result::Result<(), Self::Error> {
+        let (sender, receiver) = oneshot::channel();
+        let sender_mutex = Arc::new(std::sync::Mutex::new(Some(sender)));
+        let _ = self.set_async_interrupt(super::Trigger::Both, move |_| {
+            if let Some(sender) = sender_mutex.lock().unwrap().take() {
+                sender.send(()).unwrap();
+            }
+        });
+        Ok(receiver.await.unwrap())
     }
 }
